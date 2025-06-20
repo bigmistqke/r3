@@ -56,8 +56,13 @@ export function increaseHeapSize(n: number) {
 }
 
 function insertIntoHeap(n: Computed<unknown>) {
-  const flags = n.flags;
+  let flags = n.flags;
   if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
+  if (flags & ReactiveFlags.Check) {
+    flags =
+      (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
+      ReactiveFlags.Dirty;
+  }
   n.flags = flags | ReactiveFlags.InHeap;
   const height = n.height;
   const heapAtHeight = dirtyHeap[height];
@@ -180,14 +185,7 @@ function recompute(el: Computed<unknown>) {
     el.value = value;
 
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      const o = s.sub;
-      const flags = o.flags;
-      if (flags & ReactiveFlags.Check) {
-        o.flags =
-          (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
-          ReactiveFlags.Dirty;
-      }
-      insertIntoHeap(o);
+      insertIntoHeap(s.sub);
     }
   }
 }
@@ -339,13 +337,6 @@ export function setSignal(el: Signal<unknown>, v: unknown) {
   el.value = v;
   for (let link = el.subs; link !== null; link = link.nextSub) {
     markedHeap = false;
-    const sub = link.sub;
-    const flags = sub.flags;
-    if (flags & ReactiveFlags.Check) {
-      sub.flags =
-        (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
-        ReactiveFlags.Dirty;
-    }
     insertIntoHeap(link.sub);
   }
 }
