@@ -326,8 +326,8 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
         updateIfNecessary(owner);
       }
       const height = owner.height;
-      if (height >= c.height) {
-        c.height = height + 1;
+      if (height >= context.height) {
+        context.height = height + 1;
       }
     }
   }
