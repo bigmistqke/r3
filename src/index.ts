@@ -128,6 +128,8 @@ export function computed<T>(fn: () => T): Computed<T> {
   return self;
 }
 
+export function signal<T>(v: T, firewall: Computed<unknown>): FirewallSignal<T>;
+export function signal<T>(v: T): Signal<T>;
 export function signal<T>(
   v: T,
   firewall: Computed<unknown> | null = null,
