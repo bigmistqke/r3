@@ -57,7 +57,7 @@ export function increaseHeapSize(n: number) {
 
 function insertIntoHeap(n: Computed<unknown>) {
   const flags = n.flags;
-  if (flags & ReactiveFlags.InHeap) return;
+  if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
   n.flags = flags | ReactiveFlags.InHeap;
   const height = n.height;
   const heapAtHeight = dirtyHeap[height];
@@ -115,14 +115,14 @@ export function computed<T>(fn: () => T): Computed<T> {
   if (context) {
     if (context.depsTail === null) {
       self.height = context.height;
-      recompute(self, false);
+      recompute(self);
     } else {
       self.height = context.height + 1;
       insertIntoHeap(self);
     }
     link(self, context);
   } else {
-    recompute(self, false);
+    recompute(self);
   }
 
   return self;
@@ -151,13 +151,8 @@ export function signal<T>(
   }
 }
 
-function recompute(el: Computed<unknown>, del: boolean) {
-  if (del) {
-    deleteFromHeap(el);
-  } else {
-    el.nextHeap = undefined;
-    el.prevHeap = el;
-  }
+function recompute(el: Computed<unknown>) {
+  deleteFromHeap(el);
 
   runDisposal(el);
   const oldcontext = context;
@@ -188,7 +183,9 @@ function recompute(el: Computed<unknown>, del: boolean) {
       const o = s.sub;
       const flags = o.flags;
       if (flags & ReactiveFlags.Check) {
-        o.flags = flags | ReactiveFlags.Dirty;
+        o.flags =
+          (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
+          ReactiveFlags.Dirty;
       }
       insertIntoHeap(o);
     }
@@ -198,7 +195,8 @@ function recompute(el: Computed<unknown>, del: boolean) {
 function updateIfNecessary(el: Computed<unknown>): void {
   if (el.flags & ReactiveFlags.Check) {
     for (let d = el.deps; d; d = d.nextDep) {
-      const dep = d.dep;
+      const dep1 = d.dep;
+      const dep = "owner" in dep1 ? dep1.owner : dep1;
       if ("fn" in dep) {
         updateIfNecessary(dep);
       }
@@ -209,7 +207,7 @@ function updateIfNecessary(el: Computed<unknown>): void {
   }
 
   if (el.flags & ReactiveFlags.Dirty) {
-    recompute(el, true);
+    recompute(el);
   }
 
   el.flags = ReactiveFlags.None;
@@ -320,16 +318,16 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
 
     const owner = "owner" in el ? el.owner : el;
     if ("fn" in owner) {
-      const height = owner.height;
-      if (height >= context.height) {
-        context.height = height + 1;
-      }
       if (
-        height >= minDirty ||
+        owner.height >= minDirty ||
         owner.flags & (ReactiveFlags.Dirty | ReactiveFlags.Check)
       ) {
         markHeap();
         updateIfNecessary(owner);
+      }
+      const height = owner.height;
+      if (height >= c.height) {
+        c.height = height + 1;
       }
     }
   }
@@ -341,6 +339,13 @@ export function setSignal(el: Signal<unknown>, v: unknown) {
   el.value = v;
   for (let link = el.subs; link !== null; link = link.nextSub) {
     markedHeap = false;
+    const sub = link.sub;
+    const flags = sub.flags;
+    if (flags & ReactiveFlags.Check) {
+      sub.flags =
+        (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
+        ReactiveFlags.Dirty;
+    }
     insertIntoHeap(link.sub);
   }
 }
@@ -348,7 +353,7 @@ export function setSignal(el: Signal<unknown>, v: unknown) {
 function markNode(el: Computed<unknown>, newState = ReactiveFlags.Dirty) {
   const flags = el.flags;
   if ((flags & (ReactiveFlags.Check | ReactiveFlags.Dirty)) >= newState) return;
-  el.flags = flags | newState;
+  el.flags = (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) | newState;
   for (let link = el.subs; link !== null; link = link.nextSub) {
     markNode(link.sub, ReactiveFlags.Check);
   }
@@ -378,11 +383,9 @@ function markHeap() {
 export function stabilize() {
   for (minDirty = 0; minDirty <= maxDirty; minDirty++) {
     let el = dirtyHeap[minDirty];
-    dirtyHeap[minDirty] = undefined;
     while (el !== undefined) {
-      const next = el.nextHeap;
-      recompute(el, false);
-      el = next;
+      recompute(el);
+      el = dirtyHeap[minDirty];
     }
   }
 }
