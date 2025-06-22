@@ -336,7 +336,6 @@ export function setSignal(el: Signal<unknown>, v: unknown) {
   if (el.value === v) return;
   el.value = v;
   for (let link = el.subs; link !== null; link = link.nextSub) {
-    markedHeap = false;
     insertIntoHeap(link.sub);
   }
 }
@@ -372,6 +371,7 @@ function markHeap() {
 }
 
 export function stabilize() {
+  markedHeap = false;
   for (minDirty = 0; minDirty <= maxDirty; minDirty++) {
     let el = dirtyHeap[minDirty];
     while (el !== undefined) {
