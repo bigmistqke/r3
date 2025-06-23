@@ -22,6 +22,7 @@ export interface RawSignal<T> {
   subs: Link | null;
   subsTail: Link | null;
   value: T;
+  error?: unknown;
 }
 
 interface FirewallSignal<T> extends RawSignal<T> {
@@ -37,14 +38,20 @@ type AsyncSignal<T> = Signal<Promise<T>> & {
   loading: FirewallSignal<boolean>;
 };
 
-export interface Computed<T> extends RawSignal<T> {
+export interface Owner {
+  disposal: Disposable | Disposable[] | null;
+  parent: Owner | null;
+  firstChild: Owner | null;
+  nextSibling: Owner | null;
+}
+
+export interface Computed<T> extends RawSignal<T>, Owner {
   deps: Link | null;
   depsTail: Link | null;
   flags: ReactiveFlags;
   height: number;
   nextHeap: Computed<unknown> | undefined;
   prevHeap: Computed<unknown>;
-  disposal: Disposable | Disposable[] | null;
   fn: () => T;
   child: FirewallSignal<unknown> | null;
 }
@@ -120,10 +127,20 @@ export function computed<T>(fn: () => T): Computed<T> {
     depsTail: null,
     subs: null,
     subsTail: null,
+    parent: context,
+    nextSibling: null,
+    firstChild: null,
     flags: ReactiveFlags.None,
   };
   self.prevHeap = self;
   if (context) {
+    const lastChild = context.firstChild;
+    if (lastChild === null) {
+      context.firstChild = self;
+    } else {
+      self.nextSibling = lastChild;
+      context.firstChild = self;
+    }
     if (context.depsTail === null) {
       self.height = context.height;
       recompute(self);
@@ -131,7 +148,6 @@ export function computed<T>(fn: () => T): Computed<T> {
       self.height = context.height + 1;
       insertIntoHeap(self);
     }
-    link(self, context);
   } else {
     recompute(self);
   }
@@ -156,6 +172,9 @@ export function asyncComputed<T>(
     depsTail: null,
     subs: null,
     subsTail: null,
+    parent: null,
+    nextSibling: null,
+    firstChild: null,
     flags: ReactiveFlags.None,
   };
   self.loading = signal(true, self);
@@ -164,23 +183,31 @@ export function asyncComputed<T>(
     setSignal(self.loading, true); // firewall set
     const p = fn(get);
     p.then((v) => {
-      setSignal(self.loaded, v);
-      setSignal(self.loading, false);
+      if (self.value === p) {
+        setSignal(self.loaded, v);
+        setSignal(self.loading, false);
+      }
     });
     return p;
   };
   self.prevHeap = self;
   if (context) {
+    const lastChild = context.firstChild;
+    if (lastChild === null) {
+      context.firstChild = self;
+    } else {
+      self.nextSibling = lastChild;
+      context.firstChild = self;
+    }
     if (context.depsTail === null) {
       self.height = context.height;
-      recompute(self, false);
+      recompute(self);
     } else {
       self.height = context.height + 1;
       insertIntoHeap(self);
     }
-    link(self, context);
   } else {
-    recompute(self, false);
+    recompute(self);
   }
 
   return self;
@@ -220,13 +247,19 @@ export function signal<T>(
 
 function recompute(el: Computed<unknown>) {
   deleteFromHeap(el);
+  disposeChildren(el);
 
-  runDisposal(el);
   const oldcontext = context;
   context = el;
   el.depsTail = null;
   el.flags = ReactiveFlags.RecomputingDeps;
-  const value = el.fn();
+  let value;
+  try {
+    value = el.fn();
+    el.error = undefined;
+  } catch (e) {
+    el.error = e;
+  }
   el.flags = ReactiveFlags.None;
   context = oldcontext;
 
@@ -256,7 +289,7 @@ function updateIfNecessary(el: Computed<unknown>): void {
   if (el.flags & ReactiveFlags.Check) {
     for (let d = el.deps; d; d = d.nextDep) {
       const dep1 = d.dep;
-      const dep = "owner" in dep1 ? dep1.owner : dep1;
+      const dep = ("owner" in dep1 ? dep1.owner : dep1) as Computed<unknown>;
       if ("fn" in dep) {
         updateIfNecessary(dep);
       }
@@ -288,21 +321,8 @@ function unlinkSubs(link: Link): Link | null {
     prevSub.nextSub = nextSub;
   } else {
     dep.subs = nextSub;
-    if (nextSub === null && "fn" in dep) {
-      unwatched(dep);
-    }
   }
   return nextDep;
-}
-
-function unwatched(el: Computed<unknown>) {
-  deleteFromHeap(el);
-  let dep = el.deps;
-  while (dep !== null) {
-    dep = unlinkSubs(dep);
-  }
-  el.deps = null;
-  runDisposal(el);
 }
 
 // https://github.com/stackblitz/alien-signals/blob/v2.0.3/src/system.ts#L52
@@ -389,10 +409,13 @@ export function read<T>(
         updateIfNecessary(owner);
       }
       const height = owner.height;
-      if (height >= context.height) {
-        context.height = height + 1;
+      if (height >= c.height) {
+        c.height = height + 1;
       }
     }
+  }
+  if (el.error) {
+    throw el.error;
   }
   return el.value;
 }
@@ -461,7 +484,28 @@ export function onCleanup(fn: Disposable): Disposable {
   return fn;
 }
 
-function runDisposal(node: Computed<unknown>): void {
+function disposeChildren(node: Owner): void {
+  let child = node.firstChild;
+  while (child) {
+    const nextChild = child.nextSibling;
+    if ((child as Computed<unknown>).deps) {
+      const n = child as Computed<unknown>;
+      // console.error("here", n)
+      deleteFromHeap(n);
+      unlinkSubs(n.deps as Link);
+      n.deps = null;
+      n.depsTail = null;
+      // (child as Computed<unknown>).flags = ReactiveFlags.None;
+    }
+    disposeChildren(child);
+    child = nextChild;
+  }
+  node.firstChild = null;
+  node.nextSibling = null;
+  runDisposal(node);
+}
+
+function runDisposal(node: Owner): void {
   if (!node.disposal) return;
 
   if (Array.isArray(node.disposal)) {
@@ -478,4 +522,17 @@ function runDisposal(node: Computed<unknown>): void {
 
 export function getContext(): Computed<unknown> | null {
   return context;
+}
+
+export function runWithOwner<T>(
+  owner: Computed<unknown> | null,
+  fn: () => T,
+): T {
+  const oldContext = context;
+  context = owner;
+  try {
+    return fn();
+  } finally {
+    context = oldContext;
+  }
 }
