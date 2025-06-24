@@ -490,12 +490,14 @@ function disposeChildren(node: Owner): void {
     const nextChild = child.nextSibling;
     if ((child as Computed<unknown>).deps) {
       const n = child as Computed<unknown>;
-      // console.error("here", n)
       deleteFromHeap(n);
-      unlinkSubs(n.deps as Link);
+      let toRemove = n.deps;
+      do {
+        toRemove = unlinkSubs(toRemove!);
+      } while (toRemove !== null);
       n.deps = null;
       n.depsTail = null;
-      // (child as Computed<unknown>).flags = ReactiveFlags.None;
+      n.flags = ReactiveFlags.None;
     }
     disposeChildren(child);
     child = nextChild;
