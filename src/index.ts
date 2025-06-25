@@ -24,7 +24,7 @@ export interface RawSignal<T> {
   value: T;
 }
 
-interface FirewallSignal<T> extends RawSignal<T> {
+export interface FirewallSignal<T> extends RawSignal<T> {
   owner: Computed<unknown>;
   nextChild: FirewallSignal<unknown> | null;
 }
@@ -32,9 +32,10 @@ interface FirewallSignal<T> extends RawSignal<T> {
 export type Signal<T> = RawSignal<T> | FirewallSignal<T>;
 
 const initial = Symbol("INITIAL");
-type AsyncSignal<T> = Signal<Promise<T>> & {
+export type AsyncSignal<T> = Signal<Promise<T>> & {
   loaded: Signal<T | typeof initial>;
   loading: FirewallSignal<boolean>;
+  error: Signal<Error | undefined>;
 };
 
 export interface Computed<T> extends RawSignal<T> {
@@ -135,9 +136,9 @@ export function computed<T>(fn: () => T): Computed<T> {
 }
 
 export function asyncComputed<T>(
-  fn: (get: <U>(signal: Signal<U>) => U) => Promise<T>,
+  fn: (get: <U>(signal: Signal<U>) => U) => T | Promise<T>
 ): AsyncSignal<T> {
-  const self: Computed<Promise<T>> & AsyncSignal<T> = {
+  const self: Computed<T | Promise<T>> & AsyncSignal<T> = {
     disposal: null,
     fn: undefined as any,
     value: undefined as any,
@@ -147,6 +148,7 @@ export function asyncComputed<T>(
     prevHeap: null as any,
     loaded: signal(initial),
     loading: null as any,
+    error: null as any,
     deps: null,
     depsTail: null,
     subs: null,
@@ -154,15 +156,32 @@ export function asyncComputed<T>(
     flags: ReactiveFlags.None,
   };
   self.loading = signal(true, self);
+  self.error = signal(undefined, self);
   const get = <U>(s: Signal<U>): U => read(s, self);
   self.fn = () => {
-    setSignal(self.loading, true); // firewall set
-    const p = fn(get);
-    p.then((v) => {
-      setSignal(self.loaded, v);
-      setSignal(self.loading, false);
-    });
-    return p;
+    try {
+      const p = fn(get);
+      if (p instanceof Promise) {
+        setSignal(self.loading, true); // firewall set
+        p.then((v) => {
+          console.log("loaded", v);
+          setSignal(self.loaded, v);
+        })
+          .catch((e) => {
+            setSignal(self.error, e);
+          })
+          .finally(() => {
+            console.log("finally");
+            setSignal(self.loading, false);
+          });
+      } else {
+        setSignal(self.loaded, p);
+      }
+      return p;
+    } catch (e) {
+      setSignal(self.error, e);
+      throw e;
+    }
   };
   self.prevHeap = self;
   if (context) {
@@ -194,7 +213,7 @@ export function signal<T>(v: T, firewall: Computed<unknown>): FirewallSignal<T>;
 export function signal<T>(v: T): Signal<T>;
 export function signal<T>(
   v: T,
-  firewall: Computed<unknown> | null = null,
+  firewall: Computed<unknown> | null = null
 ): Signal<T> {
   if (firewall !== null) {
     return (firewall.child = {
@@ -226,7 +245,13 @@ function recompute(el: Computed<unknown>, del: boolean) {
   context = el;
   el.depsTail = null;
   el.flags = ReactiveFlags.RecomputingDeps;
-  const value = el.fn();
+  let value: unknown;
+  try {
+    value = el.fn();
+  } catch (e) {
+    // TODO: handle error
+    console.error(e);
+  }
   el.flags = ReactiveFlags.None;
   context = oldcontext;
 
@@ -312,7 +337,7 @@ function unwatched(el: Computed<unknown>) {
 // https://github.com/stackblitz/alien-signals/blob/v2.0.3/src/system.ts#L52
 function link(
   dep: Signal<unknown> | Computed<unknown>,
-  sub: Computed<unknown>,
+  sub: Computed<unknown>
 ) {
   const prevDep = sub.depsTail;
   if (prevDep !== null && prevDep.dep === dep) {
@@ -378,7 +403,7 @@ function isValidLink(checkLink: Link, sub: Computed<unknown>): boolean {
 
 export function read<T>(
   el: Signal<T> | Computed<T>,
-  c: Computed<unknown> | null = context,
+  c: Computed<unknown> | null = context
 ): T {
   if (c) {
     link(el, c);
