@@ -1,5 +1,13 @@
 import { bench } from "vitest";
-import { signal, computed, stabilize, read, Computed, setSignal, Signal } from "../../src";
+import {
+  signal,
+  computed,
+  stabilize,
+  read,
+  Computed,
+  setSignal,
+  Signal,
+} from "../../src";
 
 const FAN_DOWN_SIZE = 200;
 
@@ -15,8 +23,11 @@ bench("fan left", () => {
     bItems.push(computed(() => read(s) + read(aItems[i]) * 2));
   }
   let xOut!: Signal<number>;
-  const xProjector = computed(function(this: Computed<void>)  {
-    const out = (read(isHigh) ? aItems : bItems).reduce((acc, c) => (acc + read(c)), 0);
+  const xProjector = computed(function (this: Computed<void>) {
+    const out = (read(isHigh) ? aItems : bItems).reduce(
+      (acc, c) => acc + read(c),
+      0,
+    );
     if (xOut === undefined) {
       xOut = signal(out, this);
     } else {
