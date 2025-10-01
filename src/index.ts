@@ -401,10 +401,7 @@ export function read<T>(
 
     const owner = "owner" in el ? el.owner : el;
     if ("fn" in owner) {
-      if (
-        owner.height >= minDirty ||
-        owner.flags & (ReactiveFlags.Dirty | ReactiveFlags.Check)
-      ) {
+      if (owner.height >= minDirty) {
         markHeap();
         updateIfNecessary(owner);
       }
