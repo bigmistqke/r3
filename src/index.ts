@@ -8,6 +8,7 @@ export const enum ReactiveFlags {
   Dirty = 1 << 1,
   RecomputingDeps = 1 << 2,
   InHeap = 1 << 3,
+  InHeapHeight = 1 << 4,
 }
 
 export interface Link {
@@ -68,16 +69,8 @@ export function increaseHeapSize(n: number) {
   }
 }
 
-function insertIntoHeap(n: Computed<unknown>) {
-  let flags = n.flags;
-  if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
-  if (flags & ReactiveFlags.Check) {
-    flags =
-      (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
-      ReactiveFlags.Dirty;
-  }
-  n.flags = flags | ReactiveFlags.InHeap;
-  const height = n.height;
+function actualInsertIntoHeap(n: Computed<unknown>, f: number) {
+    const height = n.height;
   const heapAtHeight = dirtyHeap[height];
   if (heapAtHeight === undefined) {
     dirtyHeap[height] = n;
@@ -91,11 +84,42 @@ function insertIntoHeap(n: Computed<unknown>) {
     maxDirty = height;
   }
 }
+function insertIntoHeap(n: Computed<unknown>) {
+  let flags = n.flags;
+  if (
+    flags &
+    (ReactiveFlags.InHeap |
+      ReactiveFlags.RecomputingDeps)
+  )
+    return;
+  if (flags & ReactiveFlags.Check) {
+    flags =
+      (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
+      ReactiveFlags.Dirty;
+  }
+  n.flags = flags | ReactiveFlags.InHeap;
+  if (!(flags & ReactiveFlags.InHeapHeight)) {
+    actualInsertIntoHeap(n, flags);
+  }
+}
+
+function insertIntoHeapHeight(n: Computed<unknown>) {
+  let flags = n.flags;
+  if (
+    flags &
+    (ReactiveFlags.InHeap |
+      ReactiveFlags.RecomputingDeps |
+      ReactiveFlags.InHeapHeight)
+  )
+    return;
+  n.flags = flags | ReactiveFlags.InHeapHeight;
+  actualInsertIntoHeap(n, flags);
+}
 
 function deleteFromHeap(n: Computed<unknown>) {
   const flags = n.flags;
-  if (!(flags & ReactiveFlags.InHeap)) return;
-  n.flags = flags & ~ReactiveFlags.InHeap;
+  if (!(flags & (ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight))) return;
+  n.flags = flags & ~(ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight);
   const height = n.height;
   if (n.prevHeap === n) {
     dirtyHeap[height] = undefined;
@@ -156,7 +180,7 @@ export function computed<T>(fn: () => T): Computed<T> {
 }
 
 export function asyncComputed<T>(
-  fn: (get: <U>(signal: Signal<U>) => U) => Promise<T>,
+  fn: (get: <U>(signal: Signal<U>) => U) => Promise<T>
 ): AsyncSignal<T> {
   const self: Computed<Promise<T>> & AsyncSignal<T> = {
     disposal: null,
@@ -226,7 +250,7 @@ export function signal<T>(v: T, firewall: Computed<unknown>): FirewallSignal<T>;
 export function signal<T>(v: T): Signal<T>;
 export function signal<T>(
   v: T,
-  firewall: Computed<unknown> | null = null,
+  firewall: Computed<unknown> | null = null
 ): Signal<T> {
   if (firewall !== null) {
     return (firewall.child = {
@@ -254,6 +278,7 @@ function recompute(el: Computed<unknown>) {
   el.depsTail = null;
   el.flags = ReactiveFlags.RecomputingDeps;
   let value;
+  let oldHeight = el.height;
   try {
     value = el.fn();
     el.error = undefined;
@@ -281,6 +306,10 @@ function recompute(el: Computed<unknown>) {
 
     for (let s = el.subs; s !== null; s = s.nextSub) {
       insertIntoHeap(s.sub);
+    }
+  } else if (el.height != oldHeight) {
+    for (let s = el.subs; s !== null; s = s.nextSub) {
+      insertIntoHeapHeight(s.sub);
     }
   }
 }
@@ -328,7 +357,7 @@ function unlinkSubs(link: Link): Link | null {
 // https://github.com/stackblitz/alien-signals/blob/v2.0.3/src/system.ts#L52
 function link(
   dep: Signal<unknown> | Computed<unknown>,
-  sub: Computed<unknown>,
+  sub: Computed<unknown>
 ) {
   const prevDep = sub.depsTail;
   if (prevDep !== null && prevDep.dep === dep) {
@@ -394,7 +423,7 @@ function isValidLink(checkLink: Link, sub: Computed<unknown>): boolean {
 
 export function read<T>(
   el: Signal<T> | Computed<T>,
-  c: Computed<unknown> | null = context,
+  c: Computed<unknown> | null = context
 ): T {
   if (c) {
     link(el, c);
@@ -450,7 +479,27 @@ function markHeap() {
   markedHeap = true;
   for (let i = 0; i <= maxDirty; i++) {
     for (let el = dirtyHeap[i]; el !== undefined; el = el.nextHeap) {
-      markNode(el);
+      if (el.flags & ReactiveFlags.InHeap) markNode(el);
+    }
+  }
+}
+
+function adjustHeight(el: Computed<unknown>) {
+  deleteFromHeap(el);
+  let newHeight = el.height;
+  for (let d = el.deps; d; d = d.nextDep) {
+    const dep1 = d.dep;
+    const dep = ("owner" in dep1 ? dep1.owner : dep1) as Computed<unknown>;
+    if ("fn" in dep) {
+      if (dep.height >= newHeight) {
+        newHeight = dep.height + 1;
+      }
+    }
+  }
+  if (el.height !== newHeight) {
+    el.height = newHeight;
+    for (let s = el.subs; s !== null; s = s.nextSub) {
+      insertIntoHeapHeight(s.sub);
     }
   }
 }
@@ -460,7 +509,10 @@ export function stabilize() {
   for (minDirty = 0; minDirty <= maxDirty; minDirty++) {
     let el = dirtyHeap[minDirty];
     while (el !== undefined) {
-      recompute(el);
+      if (el.flags & ReactiveFlags.InHeap) recompute(el);
+      else {
+        adjustHeight(el);
+      }
       el = dirtyHeap[minDirty];
     }
   }
@@ -525,7 +577,7 @@ export function getContext(): Computed<unknown> | null {
 
 export function runWithOwner<T>(
   owner: Computed<unknown> | null,
-  fn: () => T,
+  fn: () => T
 ): T {
   const oldContext = context;
   context = owner;
