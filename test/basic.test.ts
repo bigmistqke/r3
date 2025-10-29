@@ -347,3 +347,36 @@ test("firewall signals height jump", () => {
   expect(x.value).toBe(10);
   expect(n.value).toBe(10);
 });
+
+test("bad fallback handling", () => {
+  const a = signal(0);
+  const c1 = computed(() => read(a));
+  const c2 = computed(() => read(c1));
+  const c3 = computed(() => read(c2));
+
+  const x1 = computed(() => {
+    const aval = read(a)
+    if (aval > 0) {
+      read(c3);
+    }
+    return +(aval == 2);
+  });
+
+  const x2 = computed(() => read(x1));
+  
+  const y = computed(() => {
+    const aval = read(c2);
+    if (aval == 2) {
+      return aval + read(x2);
+    }
+    return aval;
+  });
+
+  expect(y.value).toBe(0);
+  setSignal(a, 1);
+  stabilize();
+  expect(y.value).toBe(1);
+  setSignal(a, 2);
+  stabilize();
+  expect(y.value).toBe(3);
+});
