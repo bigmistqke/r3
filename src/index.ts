@@ -431,6 +431,7 @@ export function read<T>(
     const owner = "owner" in el ? el.owner : el;
     if ("fn" in owner) {
       if (owner.height >= minDirty) {
+        markNode(c);
         markHeap();
         updateIfNecessary(owner);
       }
