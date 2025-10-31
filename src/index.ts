@@ -8,7 +8,7 @@ export const enum ReactiveFlags {
   Dirty = 1 << 1,
   RecomputingDeps = 1 << 2,
   InHeap = 1 << 3,
-  InHeapHeight = 1 << 4,
+  AdjustChildrenHeight = 1 << 4,
 }
 
 export interface Link {
@@ -93,28 +93,34 @@ function insertIntoHeap(n: Computed<unknown>) {
       ReactiveFlags.Dirty |
       ReactiveFlags.InHeap;
   } else n.flags = flags | ReactiveFlags.InHeap;
-  if (!(flags & ReactiveFlags.InHeapHeight)) {
+  if (!(flags & ReactiveFlags.AdjustChildrenHeight)) {
     actualInsertIntoHeap(n);
   }
 }
 
-function insertIntoHeapHeight(n: Computed<unknown>) {
+function insertIntoHeapHeight(n: Computed<unknown>, newHeight: number) {
+  if (newHeight < n.height) {
+    return;
+  }
+  n.height = newHeight + 1;
   let flags = n.flags;
   if (
     flags &
     (ReactiveFlags.InHeap |
       ReactiveFlags.RecomputingDeps |
-      ReactiveFlags.InHeapHeight)
+      ReactiveFlags.AdjustChildrenHeight)
   )
     return;
-  n.flags = flags | ReactiveFlags.InHeapHeight;
+  n.flags = flags | ReactiveFlags.AdjustChildrenHeight;
   actualInsertIntoHeap(n);
 }
 
 function deleteFromHeap(n: Computed<unknown>) {
   const flags = n.flags;
-  if (!(flags & (ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight))) return;
-  n.flags = flags & ~(ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight);
+  if (!(flags & (ReactiveFlags.InHeap | ReactiveFlags.AdjustChildrenHeight)))
+    return;
+  n.flags =
+    flags & ~(ReactiveFlags.InHeap | ReactiveFlags.AdjustChildrenHeight);
   const height = n.height;
   if (n.prevHeap === n) {
     dirtyHeap[height] = undefined;
@@ -296,15 +302,15 @@ function recompute(el: Computed<unknown>) {
     }
   }
 
+  const newHeight = el.height;
   if (value !== el.value) {
     el.value = value;
-
     for (let s = el.subs; s !== null; s = s.nextSub) {
       insertIntoHeap(s.sub);
     }
-  } else if (el.height != oldHeight) {
+  } else if (newHeight != oldHeight) {
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      insertIntoHeapHeight(s.sub);
+      insertIntoHeapHeight(s.sub, newHeight);
     }
   }
 }
@@ -482,21 +488,9 @@ function markHeap() {
 
 function adjustHeight(el: Computed<unknown>) {
   deleteFromHeap(el);
-  let newHeight = el.height;
-  for (let d = el.deps; d; d = d.nextDep) {
-    const dep1 = d.dep;
-    const dep = ("owner" in dep1 ? dep1.owner : dep1) as Computed<unknown>;
-    if ("fn" in dep) {
-      if (dep.height >= newHeight) {
-        newHeight = dep.height + 1;
-      }
-    }
-  }
-  if (el.height !== newHeight) {
-    el.height = newHeight;
-    for (let s = el.subs; s !== null; s = s.nextSub) {
-      insertIntoHeapHeight(s.sub);
-    }
+  const height = el.height;
+  for (let s = el.subs; s !== null; s = s.nextSub) {
+    insertIntoHeapHeight(s.sub, height);
   }
 }
 
