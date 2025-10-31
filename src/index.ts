@@ -69,7 +69,7 @@ export function increaseHeapSize(n: number) {
   }
 }
 
-function actualInsertIntoHeap(n: Computed<unknown>, f: number) {
+function actualInsertIntoHeap(n: Computed<unknown>) {
   const height = n.height;
   const heapAtHeight = dirtyHeap[height];
   if (heapAtHeight === undefined) {
@@ -88,13 +88,13 @@ function insertIntoHeap(n: Computed<unknown>) {
   let flags = n.flags;
   if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
   if (flags & ReactiveFlags.Check) {
-    flags =
+    n.flags =
       (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
-      ReactiveFlags.Dirty;
-  }
-  n.flags = flags | ReactiveFlags.InHeap;
+      ReactiveFlags.Dirty |
+      ReactiveFlags.InHeap;
+  } else n.flags = flags | ReactiveFlags.InHeap;
   if (!(flags & ReactiveFlags.InHeapHeight)) {
-    actualInsertIntoHeap(n, flags);
+    actualInsertIntoHeap(n);
   }
 }
 
@@ -108,7 +108,7 @@ function insertIntoHeapHeight(n: Computed<unknown>) {
   )
     return;
   n.flags = flags | ReactiveFlags.InHeapHeight;
-  actualInsertIntoHeap(n, flags);
+  actualInsertIntoHeap(n);
 }
 
 function deleteFromHeap(n: Computed<unknown>) {
