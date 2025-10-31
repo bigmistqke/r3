@@ -62,7 +62,7 @@ let context: Computed<unknown> | null = null;
 
 let minDirty = 0;
 let maxDirty = 0;
-const dirtyHeap: (Computed<unknown> | undefined)[] = new Array(2000);
+const dirtyHeap: (Computed<unknown> | undefined)[] = new Array(2000).fill(undefined);
 export function increaseHeapSize(n: number) {
   if (n > dirtyHeap.length) {
     dirtyHeap.length = n;
@@ -70,7 +70,7 @@ export function increaseHeapSize(n: number) {
 }
 
 function actualInsertIntoHeap(n: Computed<unknown>, f: number) {
-    const height = n.height;
+  const height = n.height;
   const heapAtHeight = dirtyHeap[height];
   if (heapAtHeight === undefined) {
     dirtyHeap[height] = n;
@@ -86,12 +86,7 @@ function actualInsertIntoHeap(n: Computed<unknown>, f: number) {
 }
 function insertIntoHeap(n: Computed<unknown>) {
   let flags = n.flags;
-  if (
-    flags &
-    (ReactiveFlags.InHeap |
-      ReactiveFlags.RecomputingDeps)
-  )
-    return;
+  if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
   if (flags & ReactiveFlags.Check) {
     flags =
       (flags & ~(ReactiveFlags.Check | ReactiveFlags.Dirty)) |
@@ -517,6 +512,7 @@ export function stabilize() {
       el = dirtyHeap[minDirty];
     }
   }
+  maxDirty = 0;
 }
 
 export function onCleanup(fn: Disposable): Disposable {
