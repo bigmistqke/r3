@@ -9,6 +9,7 @@ export const enum ReactiveFlags {
   RecomputingDeps = 1 << 2,
   InHeap = 1 << 3,
   InHeapHeight = 1 << 4,
+  Zombie = 1 << 5,
 }
 
 export interface Link {
@@ -24,6 +25,7 @@ export interface RawSignal<T> {
   subsTail: Link | null;
   value: T;
   error?: unknown;
+  pendingValue: T | typeof NOT_PENDING;
 }
 
 interface FirewallSignal<T> extends RawSignal<T> {
@@ -44,6 +46,8 @@ export interface Owner {
   parent: Owner | null;
   firstChild: Owner | null;
   nextSibling: Owner | null;
+  pendingDisposal: Disposable | Disposable[] | null |  typeof NOT_PENDING;
+  pendingFirstChild: Owner | null | typeof NOT_PENDING;
 }
 
 export interface Computed<T> extends RawSignal<T>, Owner {
@@ -63,6 +67,9 @@ let context: Computed<unknown> | null = null;
 let minDirty = 0;
 let maxDirty = 0;
 const dirtyHeap: (Computed<unknown> | undefined)[] = new Array(2000).fill(undefined);
+const pendingHeap: (Computed<unknown> | undefined)[] = new Array(2000).fill(undefined);
+const pendingNodes: RawSignal<unknown>[] = [];
+const NOT_PENDING = {};
 export function increaseHeapSize(n: number) {
   if (n > dirtyHeap.length) {
     dirtyHeap.length = n;
@@ -150,6 +157,9 @@ export function computed<T>(fn: () => T): Computed<T> {
     nextSibling: null,
     firstChild: null,
     flags: ReactiveFlags.None,
+    pendingValue: NOT_PENDING,
+    pendingDisposal: NOT_PENDING,
+    pendingFirstChild: NOT_PENDING
   };
   self.prevHeap = self;
   if (context) {
@@ -162,13 +172,13 @@ export function computed<T>(fn: () => T): Computed<T> {
     }
     if (context.depsTail === null) {
       self.height = context.height;
-      recompute(self);
+      recompute(self, true);
     } else {
       self.height = context.height + 1;
       insertIntoHeap(self);
     }
   } else {
-    recompute(self);
+    recompute(self, true);
   }
 
   return self;
@@ -195,6 +205,9 @@ export function asyncComputed<T>(
     nextSibling: null,
     firstChild: null,
     flags: ReactiveFlags.None,
+    pendingValue: NOT_PENDING,
+    pendingDisposal: NOT_PENDING,
+    pendingFirstChild: NOT_PENDING
   };
   self.loading = signal(true, self);
   const get = <U>(s: Signal<U>): U => read(s, self);
@@ -220,13 +233,13 @@ export function asyncComputed<T>(
     }
     if (context.depsTail === null) {
       self.height = context.height;
-      recompute(self);
+      recompute(self, true);
     } else {
       self.height = context.height + 1;
       insertIntoHeap(self);
     }
   } else {
-    recompute(self);
+    recompute(self, true);
   }
 
   return self;
@@ -254,19 +267,29 @@ export function signal<T>(
       subsTail: null,
       owner: firewall,
       nextChild: firewall.child,
+      pendingValue: NOT_PENDING,
     });
   } else {
     return {
       value: v,
       subs: null,
       subsTail: null,
+      pendingValue: NOT_PENDING,
     };
   }
 }
 
-function recompute(el: Computed<unknown>) {
+function recompute(el: Computed<unknown>, create: boolean = false): void {
   deleteFromHeap(el);
-  disposeChildren(el);
+  if (el.flags & ReactiveFlags.Zombie) return;
+  if (el.pendingValue !== NOT_PENDING) disposeChildren(el);
+  else {
+    markDisposal(el);
+    el.pendingDisposal = el.disposal;
+    el.pendingFirstChild = el.firstChild;
+    el.disposal = null;
+    el.firstChild = null;
+  }
 
   const oldcontext = context;
   context = el;
@@ -296,14 +319,17 @@ function recompute(el: Computed<unknown>) {
     }
   }
 
-  if (value !== el.value) {
-    el.value = value;
+  if (el.pendingValue === NOT_PENDING ? value !== el.value : el.pendingValue !== value) {
+    if (!create && el.pendingValue === NOT_PENDING) pendingNodes.push(el);
+    create ? (el.value = value) : (el.pendingValue = value);
 
     for (let s = el.subs; s !== null; s = s.nextSub) {
+      if (s.sub.flags & ReactiveFlags.Zombie) continue;
       insertIntoHeap(s.sub);
     }
   } else if (el.height != oldHeight) {
     for (let s = el.subs; s !== null; s = s.nextSub) {
+      if (s.sub.flags & ReactiveFlags.Zombie) continue;
       insertIntoHeapHeight(s.sub);
     }
   }
@@ -439,13 +465,15 @@ export function read<T>(
   if (el.error) {
     throw el.error;
   }
-  return el.value;
+  return !context || el.pendingValue === NOT_PENDING ? el.value : (el.pendingValue as T);
 }
 
 export function setSignal(el: Signal<unknown>, v: unknown) {
-  if (el.value === v) return;
-  el.value = v;
+  if (el.pendingValue === NOT_PENDING && el.value === v || el.pendingValue === v) return;
+  if (el.pendingValue === NOT_PENDING) pendingNodes.push(el);
+  el.pendingValue = v;
   for (let link = el.subs; link !== null; link = link.nextSub) {
+    if (link.sub.flags & ReactiveFlags.Zombie) continue;
     insertIntoHeap(link.sub);
   }
 }
@@ -513,6 +541,17 @@ export function stabilize() {
     }
   }
   maxDirty = 0;
+  for (let i = 0; i < pendingNodes.length; i++) {
+    const n = pendingNodes[i];
+    n.value = n.pendingValue as any;
+    n.pendingValue = NOT_PENDING;
+    if ((n as Computed<unknown>).fn) {
+      disposeChildren(n as Computed<unknown>, true);
+      (n as Computed<unknown>).pendingDisposal = NOT_PENDING;
+      (n as Computed<unknown>).pendingFirstChild = NOT_PENDING;
+    }
+  }
+  pendingNodes.length = 0;
 }
 
 export function onCleanup(fn: Disposable): Disposable {
@@ -530,8 +569,17 @@ export function onCleanup(fn: Disposable): Disposable {
   return fn;
 }
 
-function disposeChildren(node: Owner): void {
-  let child = node.firstChild;
+function markDisposal(el: Owner): void {
+  let child = el.firstChild;
+  while (child) {
+    (child as Computed<unknown>).flags |= ReactiveFlags.Zombie;
+    markDisposal(child);
+    child = child.nextSibling;
+  }
+}
+
+function disposeChildren(node: Owner, zombie?: boolean): void {
+  let child = zombie ? node.pendingFirstChild as Owner : node.firstChild;
   while (child) {
     const nextChild = child.nextSibling;
     if ((child as Computed<unknown>).deps) {
@@ -550,22 +598,22 @@ function disposeChildren(node: Owner): void {
   }
   node.firstChild = null;
   node.nextSibling = null;
-  runDisposal(node);
+  runDisposal(node, zombie);
 }
 
-function runDisposal(node: Owner): void {
-  if (!node.disposal) return;
+function runDisposal(node: Owner, zombie?: boolean): void {
+  let disposal = zombie ? node.pendingDisposal : node.disposal;
+  if (!disposal || disposal === NOT_PENDING) return;
 
-  if (Array.isArray(node.disposal)) {
-    for (let i = 0; i < node.disposal.length; i++) {
-      const callable = node.disposal[i];
+  if (Array.isArray(disposal)) {
+    for (let i = 0; i < disposal.length; i++) {
+      const callable = disposal[i];
       callable.call(callable);
     }
   } else {
-    node.disposal.call(node.disposal);
+    (disposal as Disposable).call(disposal);
   }
-
-  node.disposal = null;
+  zombie ? (node.pendingDisposal = null) : (node.disposal = null);
 }
 
 export function getContext(): Computed<unknown> | null {
