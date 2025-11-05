@@ -63,35 +63,45 @@ export interface Computed<T> extends RawSignal<T>, Owner {
 
 let markedHeap = false;
 let context: Computed<unknown> | null = null;
-
-let minDirty = 0;
-let maxDirty = 0;
-const dirtyHeap: (Computed<unknown> | undefined)[] = new Array(2000).fill(undefined);
-const pendingHeap: (Computed<unknown> | undefined)[] = new Array(2000).fill(undefined);
+interface Heap {
+  heap: (Computed<unknown> | undefined)[];
+  min: number;
+  max: number;
+}
+const dirty: Heap = {
+  heap: new Array(2000).fill(undefined),
+  min: 0,
+  max: 0
+}
+const pending: Heap = {
+  heap: new Array(2000).fill(undefined),
+  min: 0,
+  max: 0
+}
 const pendingNodes: RawSignal<unknown>[] = [];
 const NOT_PENDING = {};
 export function increaseHeapSize(n: number) {
-  if (n > dirtyHeap.length) {
-    dirtyHeap.length = n;
+  if (n > dirty.heap.length) {
+    dirty.heap.length = n;
   }
 }
 
-function actualInsertIntoHeap(n: Computed<unknown>) {
+function actualInsertIntoHeap(n: Computed<unknown>, heap: Heap) {
   const height = n.height;
-  const heapAtHeight = dirtyHeap[height];
+  const heapAtHeight = heap.heap[height];
   if (heapAtHeight === undefined) {
-    dirtyHeap[height] = n;
+    heap.heap[height] = n;
   } else {
     const tail = heapAtHeight.prevHeap;
     tail.nextHeap = n;
     n.prevHeap = tail;
     heapAtHeight.prevHeap = n;
   }
-  if (height > maxDirty) {
-    maxDirty = height;
+  if (height > heap.max) {
+    heap.max = height;
   }
 }
-function insertIntoHeap(n: Computed<unknown>) {
+function insertIntoHeap(n: Computed<unknown>, heap: Heap) {
   let flags = n.flags;
   if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
   if (flags & ReactiveFlags.Check) {
@@ -101,11 +111,11 @@ function insertIntoHeap(n: Computed<unknown>) {
       ReactiveFlags.InHeap;
   } else n.flags = flags | ReactiveFlags.InHeap;
   if (!(flags & ReactiveFlags.InHeapHeight)) {
-    actualInsertIntoHeap(n);
+    actualInsertIntoHeap(n, heap);
   }
 }
 
-function insertIntoHeapHeight(n: Computed<unknown>) {
+function insertIntoHeapHeight(n: Computed<unknown>, heap: Heap) {
   let flags = n.flags;
   if (
     flags &
@@ -115,22 +125,22 @@ function insertIntoHeapHeight(n: Computed<unknown>) {
   )
     return;
   n.flags = flags | ReactiveFlags.InHeapHeight;
-  actualInsertIntoHeap(n);
+  actualInsertIntoHeap(n, heap);
 }
 
-function deleteFromHeap(n: Computed<unknown>) {
+function deleteFromHeap(n: Computed<unknown>, heap: Heap = dirty) {
   const flags = n.flags;
   if (!(flags & (ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight))) return;
   n.flags = flags & ~(ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight);
   const height = n.height;
   if (n.prevHeap === n) {
-    dirtyHeap[height] = undefined;
+    heap.heap[height] = undefined;
   } else {
     const next = n.nextHeap;
-    const dhh = dirtyHeap[height]!;
+    const dhh = heap.heap[height]!;
     const end = next ?? dhh;
     if (n === dhh) {
-      dirtyHeap[height] = next;
+      heap.heap[height] = next;
     } else {
       n.prevHeap.nextHeap = next;
     }
@@ -175,7 +185,7 @@ export function computed<T>(fn: () => T): Computed<T> {
       recompute(self, true);
     } else {
       self.height = context.height + 1;
-      insertIntoHeap(self);
+      insertIntoHeap(self, dirty);
     }
   } else {
     recompute(self, true);
@@ -236,7 +246,7 @@ export function asyncComputed<T>(
       recompute(self, true);
     } else {
       self.height = context.height + 1;
-      insertIntoHeap(self);
+      insertIntoHeap(self, dirty);
     }
   } else {
     recompute(self, true);
@@ -324,13 +334,11 @@ function recompute(el: Computed<unknown>, create: boolean = false): void {
     create ? (el.value = value) : (el.pendingValue = value);
 
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      if (s.sub.flags & ReactiveFlags.Zombie) continue;
-      insertIntoHeap(s.sub);
+      insertIntoHeap(s.sub, s.sub.flags & ReactiveFlags.Zombie ? pending : dirty);
     }
   } else if (el.height != oldHeight) {
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      if (s.sub.flags & ReactiveFlags.Zombie) continue;
-      insertIntoHeapHeight(s.sub);
+      insertIntoHeapHeight(s.sub, s.sub.flags & ReactiveFlags.Zombie ? pending : dirty);
     }
   }
 }
@@ -451,9 +459,10 @@ export function read<T>(
 
     const owner = "owner" in el ? el.owner : el;
     if ("fn" in owner) {
-      if (owner.height >= minDirty) {
+      const isZombie = (el as Computed<unknown>).flags & ReactiveFlags.Zombie;
+      if (owner.height >= (isZombie ? pending.min : dirty.min)) {
         markNode(c);
-        markHeap();
+        markHeap(isZombie ? pending : dirty);
         updateIfNecessary(owner);
       }
       const height = owner.height;
@@ -473,8 +482,7 @@ export function setSignal(el: Signal<unknown>, v: unknown) {
   if (el.pendingValue === NOT_PENDING) pendingNodes.push(el);
   el.pendingValue = v;
   for (let link = el.subs; link !== null; link = link.nextSub) {
-    if (link.sub.flags & ReactiveFlags.Zombie) continue;
-    insertIntoHeap(link.sub);
+    insertIntoHeap(link.sub, link.sub.flags & ReactiveFlags.Zombie ? pending : dirty);
   }
 }
 
@@ -498,17 +506,17 @@ function markNode(el: Computed<unknown>, newState = ReactiveFlags.Dirty) {
   }
 }
 
-function markHeap() {
+function markHeap(heap: Heap) {
   if (markedHeap) return;
   markedHeap = true;
-  for (let i = 0; i <= maxDirty; i++) {
-    for (let el = dirtyHeap[i]; el !== undefined; el = el.nextHeap) {
+  for (let i = 0; i <= heap.max; i++) {
+    for (let el = heap.heap[i]; el !== undefined; el = el.nextHeap) {
       if (el.flags & ReactiveFlags.InHeap) markNode(el);
     }
   }
 }
 
-function adjustHeight(el: Computed<unknown>) {
+function adjustHeight(el: Computed<unknown>, heap: Heap = dirty) {
   deleteFromHeap(el);
   let newHeight = el.height;
   for (let d = el.deps; d; d = d.nextDep) {
@@ -523,24 +531,24 @@ function adjustHeight(el: Computed<unknown>) {
   if (el.height !== newHeight) {
     el.height = newHeight;
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      insertIntoHeapHeight(s.sub);
+      insertIntoHeapHeight(s.sub, heap);
     }
   }
 }
 
 export function stabilize() {
   markedHeap = false;
-  for (minDirty = 0; minDirty <= maxDirty; minDirty++) {
-    let el = dirtyHeap[minDirty];
+  for (dirty.min = 0; dirty.min <= dirty.max; dirty.min++) {
+    let el = dirty.heap[dirty.min];
     while (el !== undefined) {
       if (el.flags & ReactiveFlags.InHeap) recompute(el);
       else {
         adjustHeight(el);
       }
-      el = dirtyHeap[minDirty];
+      el = dirty.heap[dirty.min];
     }
   }
-  maxDirty = 0;
+  dirty.max = 0;
   for (let i = 0; i < pendingNodes.length; i++) {
     const n = pendingNodes[i];
     n.value = n.pendingValue as any;
