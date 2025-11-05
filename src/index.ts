@@ -12,6 +12,13 @@ export const enum ReactiveFlags {
   Zombie = 1 << 5,
 }
 
+export const enum AsyncFlags {
+  None = 0,
+  Pending = 1 << 0,
+  Error = 1 << 1,
+  Uninitialized = 1 << 2,
+}
+
 export interface Link {
   dep: Signal<unknown> | Computed<unknown>;
   sub: Computed<unknown>;
@@ -25,6 +32,8 @@ export interface RawSignal<T> {
   subsTail: Link | null;
   value: T;
   error?: unknown;
+  asyncFlags: AsyncFlags;
+  time: number;
   pendingValue: T | typeof NOT_PENDING;
 }
 
@@ -34,19 +43,12 @@ interface FirewallSignal<T> extends RawSignal<T> {
 }
 
 export type Signal<T> = RawSignal<T> | FirewallSignal<T>;
-
-const initial = Symbol("INITIAL");
-type AsyncSignal<T> = Signal<Promise<T>> & {
-  loaded: Signal<T | typeof initial>;
-  loading: FirewallSignal<boolean>;
-};
-
 export interface Owner {
   disposal: Disposable | Disposable[] | null;
   parent: Owner | null;
   firstChild: Owner | null;
   nextSibling: Owner | null;
-  pendingDisposal: Disposable | Disposable[] | null |  typeof NOT_PENDING;
+  pendingDisposal: Disposable | Disposable[] | null | typeof NOT_PENDING;
   pendingFirstChild: Owner | null | typeof NOT_PENDING;
 }
 
@@ -55,14 +57,18 @@ export interface Computed<T> extends RawSignal<T>, Owner {
   depsTail: Link | null;
   flags: ReactiveFlags;
   height: number;
-  nextHeap: Computed<unknown> | undefined;
-  prevHeap: Computed<unknown>;
-  fn: () => T;
-  child: FirewallSignal<unknown> | null;
+  nextHeap: Computed<any> | undefined;
+  prevHeap: Computed<any>;
+  fn: (prev?: T) => T;
+  child: FirewallSignal<any> | null;
 }
 
+export class NotReadyError extends Error {}
+
 let markedHeap = false;
+let stale = false;
 let context: Computed<unknown> | null = null;
+let clock = 0;
 interface Heap {
   heap: (Computed<unknown> | undefined)[];
   min: number;
@@ -71,13 +77,13 @@ interface Heap {
 const dirty: Heap = {
   heap: new Array(2000).fill(undefined),
   min: 0,
-  max: 0
-}
+  max: 0,
+};
 const pending: Heap = {
   heap: new Array(2000).fill(undefined),
   min: 0,
-  max: 0
-}
+  max: 0,
+};
 const pendingNodes: RawSignal<unknown>[] = [];
 const NOT_PENDING = {};
 export function increaseHeapSize(n: number) {
@@ -101,7 +107,7 @@ function actualInsertIntoHeap(n: Computed<unknown>, heap: Heap) {
     heap.max = height;
   }
 }
-function insertIntoHeap(n: Computed<unknown>, heap: Heap) {
+function insertIntoHeap(n: Computed<any>, heap: Heap) {
   let flags = n.flags;
   if (flags & (ReactiveFlags.InHeap | ReactiveFlags.RecomputingDeps)) return;
   if (flags & ReactiveFlags.Check) {
@@ -150,11 +156,16 @@ function deleteFromHeap(n: Computed<unknown>, heap: Heap = dirty) {
   n.nextHeap = undefined;
 }
 
-export function computed<T>(fn: () => T): Computed<T> {
+export function computed<T>(fn: (prev?: T) => T): Computed<T>;
+export function computed<T>(fn: (prev: T) => T, initialValue: T): Computed<T>;
+export function computed<T>(
+  fn: (prev?: T) => T,
+  initialValue?: T
+): Computed<T> {
   const self: Computed<T> = {
     disposal: null,
     fn: fn,
-    value: undefined as T,
+    value: initialValue as T,
     height: 0,
     child: null,
     nextHeap: undefined,
@@ -167,9 +178,11 @@ export function computed<T>(fn: () => T): Computed<T> {
     nextSibling: null,
     firstChild: null,
     flags: ReactiveFlags.None,
+    asyncFlags: AsyncFlags.Uninitialized,
+    time: clock,
     pendingValue: NOT_PENDING,
     pendingDisposal: NOT_PENDING,
-    pendingFirstChild: NOT_PENDING
+    pendingFirstChild: NOT_PENDING,
   };
   self.prevHeap = self;
   if (context) {
@@ -195,76 +208,60 @@ export function computed<T>(fn: () => T): Computed<T> {
 }
 
 export function asyncComputed<T>(
-  fn: (get: <U>(signal: Signal<U>) => U) => Promise<T>
-): AsyncSignal<T> {
-  const self: Computed<Promise<T>> & AsyncSignal<T> = {
-    disposal: null,
-    fn: undefined as any,
-    value: undefined as any,
-    height: 0,
-    child: null,
-    nextHeap: undefined,
-    prevHeap: null as any,
-    loaded: signal(initial),
-    loading: null as any,
-    deps: null,
-    depsTail: null,
-    subs: null,
-    subsTail: null,
-    parent: null,
-    nextSibling: null,
-    firstChild: null,
-    flags: ReactiveFlags.None,
-    pendingValue: NOT_PENDING,
-    pendingDisposal: NOT_PENDING,
-    pendingFirstChild: NOT_PENDING
-  };
-  self.loading = signal(true, self);
-  const get = <U>(s: Signal<U>): U => read(s, self);
-  self.fn = () => {
-    setSignal(self.loading, true); // firewall set
-    const p = fn(get);
-    p.then((v) => {
-      if (self.value === p) {
-        setSignal(self.loaded, v);
-        setSignal(self.loading, false);
-      }
-    });
-    return p;
-  };
-  self.prevHeap = self;
-  if (context) {
-    const lastChild = context.firstChild;
-    if (lastChild === null) {
-      context.firstChild = self;
-    } else {
-      self.nextSibling = lastChild;
-      context.firstChild = self;
+  asyncFn: (prev?: T) => T | Promise<T> | AsyncIterable<T>
+): Computed<T>;
+export function asyncComputed<T>(
+  asyncFn: (prev: T) => T | Promise<T> | AsyncIterable<T>,
+  initialValue: T
+): Computed<T>;
+export function asyncComputed<T>(
+  asyncFn: (prev?: T) => T | Promise<T> | AsyncIterable<T>,
+  initialValue?: T
+): Computed<T> {
+  let lastResult = undefined as T | undefined;
+  const fn = (prev?: T) => {
+    const result = asyncFn(prev);
+    lastResult = result as T;
+    const isPromise = result instanceof Promise;
+    // @ts-expect-error
+    const iterator = result[Symbol.asyncIterator];
+    if (!isPromise && !iterator) {
+      return result as T;
     }
-    if (context.depsTail === null) {
-      self.height = context.height;
-      recompute(self, true);
+    if (isPromise) {
+      result
+        .then((v) => {
+          if (lastResult !== result) return;
+          setSignal(self, v);
+          stabilize();
+        })
+        .catch((e) => {
+          if (lastResult !== result) return;
+          setError(self, e as Error);
+          stabilize();
+        });
     } else {
-      self.height = context.height + 1;
-      insertIntoHeap(self, dirty);
+      (async () => {
+        try {
+          for await (let value of result as AsyncIterable<T>) {
+            if (lastResult !== result) return;
+            setSignal(self, value);
+            stabilize();
+          }
+        } catch (error) {
+          if (lastResult !== result) return;
+          setError(self, error as Error);
+          stabilize();
+        }
+      })();
     }
-  } else {
-    recompute(self, true);
-  }
-
+    throw new NotReadyError();
+  };
+  const self = computed<T>(fn, initialValue as T);
   return self;
 }
 
-export function readUpDefault<T>(x: AsyncSignal<T>, defaultValue: T): T {
-  const p = read(x.loaded);
-  return p === initial ? defaultValue : p;
-}
-
-export function readDownDefault<T>(x: AsyncSignal<T>, defaultValue: T): T {
-  return read(x.loading) ? readUpDefault(x, defaultValue) : defaultValue;
-}
-
-export function signal<T>(v: T, firewall: Computed<unknown>): FirewallSignal<T>;
+export function signal<T>(v: T, firewall: Computed<any>): FirewallSignal<T>;
 export function signal<T>(v: T): Signal<T>;
 export function signal<T>(
   v: T,
@@ -277,6 +274,8 @@ export function signal<T>(
       subsTail: null,
       owner: firewall,
       nextChild: firewall.child,
+      asyncFlags: AsyncFlags.None,
+      time: clock,
       pendingValue: NOT_PENDING,
     });
   } else {
@@ -284,14 +283,15 @@ export function signal<T>(
       value: v,
       subs: null,
       subsTail: null,
+      asyncFlags: AsyncFlags.None,
+      time: clock,
       pendingValue: NOT_PENDING,
     };
   }
 }
 
-function recompute(el: Computed<unknown>, create: boolean = false): void {
+function recompute(el: Computed<any>, create: boolean = false): void {
   deleteFromHeap(el);
-  if (el.flags & ReactiveFlags.Zombie) return;
   if (el.pendingValue !== NOT_PENDING) disposeChildren(el);
   else {
     markDisposal(el);
@@ -305,13 +305,22 @@ function recompute(el: Computed<unknown>, create: boolean = false): void {
   context = el;
   el.depsTail = null;
   el.flags = ReactiveFlags.RecomputingDeps;
-  let value;
+  let value = el.pendingValue === NOT_PENDING ? el.value : el.pendingValue;
   let oldHeight = el.height;
+  el.time = clock;
+  let prevAsyncFlags = el.asyncFlags;
   try {
-    value = el.fn();
-    el.error = undefined;
+    value = el.fn(value);
+    clearAsyncFlags(el);
   } catch (e) {
-    el.error = e;
+    if (e instanceof NotReadyError) {
+      setAsyncFlags(
+        el,
+        (prevAsyncFlags & ~AsyncFlags.Error) | AsyncFlags.Pending
+      );
+    } else {
+      setError(el, e as Error);
+    }
   }
   el.flags = ReactiveFlags.None;
   context = oldcontext;
@@ -328,17 +337,30 @@ function recompute(el: Computed<unknown>, create: boolean = false): void {
       el.deps = null;
     }
   }
+  const valueChanged =
+    el.pendingValue === NOT_PENDING
+      ? value !== el.value
+      : el.pendingValue !== value;
+  const asyncFlagsChanged = el.asyncFlags !== prevAsyncFlags;
 
-  if (el.pendingValue === NOT_PENDING ? value !== el.value : el.pendingValue !== value) {
-    if (!create && el.pendingValue === NOT_PENDING) pendingNodes.push(el);
-    create ? (el.value = value) : (el.pendingValue = value);
+  if (valueChanged || asyncFlagsChanged) {
+    if (valueChanged) {
+      if (!create && el.pendingValue === NOT_PENDING) pendingNodes.push(el);
+      create ? (el.value = value) : (el.pendingValue = value);
+    }
 
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      insertIntoHeap(s.sub, s.sub.flags & ReactiveFlags.Zombie ? pending : dirty);
+      insertIntoHeap(
+        s.sub,
+        s.sub.flags & ReactiveFlags.Zombie ? pending : dirty
+      );
     }
   } else if (el.height != oldHeight) {
     for (let s = el.subs; s !== null; s = s.nextSub) {
-      insertIntoHeapHeight(s.sub, s.sub.flags & ReactiveFlags.Zombie ? pending : dirty);
+      insertIntoHeapHeight(
+        s.sub,
+        s.sub.flags & ReactiveFlags.Zombie ? pending : dirty
+      );
     }
   }
 }
@@ -471,19 +493,58 @@ export function read<T>(
       }
     }
   }
-  if (el.error) {
-    throw el.error;
+  if (el.asyncFlags & AsyncFlags.Pending) {
+    if (c && !stale || el.asyncFlags & AsyncFlags.Uninitialized)
+      throw new NotReadyError();
   }
-  return !context || el.pendingValue === NOT_PENDING ? el.value : (el.pendingValue as T);
+  if (el.asyncFlags & AsyncFlags.Error) {
+    if (el.time < clock) {
+      // treat error reset like create
+      recompute(el as Computed<unknown>, true);
+      return read(el);
+    } else {
+      throw el.error;
+    }
+  }
+  return !c || el.pendingValue === NOT_PENDING
+    ? el.value
+    : (el.pendingValue as T);
 }
 
 export function setSignal(el: Signal<unknown>, v: unknown) {
-  if (el.pendingValue === NOT_PENDING && el.value === v || el.pendingValue === v) return;
-  if (el.pendingValue === NOT_PENDING) pendingNodes.push(el);
-  el.pendingValue = v;
-  for (let link = el.subs; link !== null; link = link.nextSub) {
-    insertIntoHeap(link.sub, link.sub.flags & ReactiveFlags.Zombie ? pending : dirty);
+  const valueChanged =
+    el.pendingValue === NOT_PENDING ? el.value !== v : el.pendingValue !== v;
+  if (!valueChanged && !el.asyncFlags) return;
+  if (valueChanged) {
+    if (el.pendingValue === NOT_PENDING) pendingNodes.push(el);
+    el.pendingValue = v;
   }
+  clearAsyncFlags(el);
+  el.time = clock;
+
+  for (let link = el.subs; link !== null; link = link.nextSub) {
+    insertIntoHeap(
+      link.sub,
+      link.sub.flags & ReactiveFlags.Zombie ? pending : dirty
+    );
+  }
+}
+
+function setAsyncFlags<T>(
+  signal: Signal<T>,
+  flags: AsyncFlags,
+  error: Error | null = null
+) {
+  signal.asyncFlags = flags;
+  signal.error = error;
+}
+
+function setError<T>(signal: Signal<T>, error: Error) {
+  setAsyncFlags(signal, AsyncFlags.Error | AsyncFlags.Uninitialized, error);
+}
+
+function clearAsyncFlags<T>(signal: Signal<T>) {
+  setAsyncFlags(signal, AsyncFlags.None);
 }
 
 function markNode(el: Computed<unknown>, newState = ReactiveFlags.Dirty) {
@@ -560,6 +621,7 @@ export function stabilize() {
     }
   }
   pendingNodes.length = 0;
+  clock++;
 }
 
 export function onCleanup(fn: Disposable): Disposable {
@@ -581,13 +643,14 @@ function markDisposal(el: Owner): void {
   let child = el.firstChild;
   while (child) {
     (child as Computed<unknown>).flags |= ReactiveFlags.Zombie;
+    deleteFromHeap(child as Computed<unknown>, dirty);
     markDisposal(child);
     child = child.nextSibling;
   }
 }
 
 function disposeChildren(node: Owner, zombie?: boolean): void {
-  let child = zombie ? node.pendingFirstChild as Owner : node.firstChild;
+  let child = zombie ? (node.pendingFirstChild as Owner) : node.firstChild;
   while (child) {
     const nextChild = child.nextSibling;
     if ((child as Computed<unknown>).deps) {
@@ -639,4 +702,21 @@ export function runWithOwner<T>(
   } finally {
     context = oldContext;
   }
+}
+
+export function latest<T>(fn: () => T, fallback?: T): T {
+  const prevStale = stale;
+  stale = true;
+  let result: T;
+  try {
+    result = fn();
+  } catch (err) {
+    if (err instanceof NotReadyError && arguments.length > 1) {
+      return fallback as T;
+    }
+    throw err;
+  } finally {
+    stale = prevStale;
+  }
+  return result;
 }
