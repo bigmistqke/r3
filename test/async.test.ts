@@ -188,7 +188,7 @@ test("latest tears on update", async () => {
   const a = asyncComputed(() => {
     return sleep(read(s)).then((v) => v + 1);
   });
-  const b = computed(() => latest(() => read(a)) && read(s));
+  const b = computed(() => (latest(() => read(a)), read(s)));
   const c = computed(() => read(a) && read(s));
   stabilize();
   expect(() => read(a)).toThrow(NotReadyError);
@@ -202,21 +202,10 @@ test("latest tears on update", async () => {
 
   setSignal(s, 2);
   stabilize();
-  expect(read(s)).toBe(2);
+  expect(read(s)).toBe(1);
   expect(read(a)).toBe(2);
-  expect(read(b)).toBe(2);
+  expect(read(b)).toBe(1);
   expect(read(c)).toBe(1);
-});
-
-test("latest returns fallback on uninitialized", async () => {
-  const s = signal(1);
-  const a = asyncComputed(() => {
-    return sleep(read(s)).then((v) => v + 1);
-  });
-  stabilize();
-
-  expect(() => read(a)).toThrow(NotReadyError);
-  expect(latest(() => read(a), 0)).toBe(0);
 });
 
 // test("isPending throws on uninitialized", async () => {

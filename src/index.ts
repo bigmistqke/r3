@@ -48,8 +48,8 @@ export interface Owner {
   parent: Owner | null;
   firstChild: Owner | null;
   nextSibling: Owner | null;
-  pendingDisposal: Disposable | Disposable[] | null | typeof NOT_PENDING;
-  pendingFirstChild: Owner | null | typeof NOT_PENDING;
+  pendingDisposal: Disposable | Disposable[] | null;
+  pendingFirstChild: Owner | null;
 }
 
 export interface Computed<T> extends RawSignal<T>, Owner {
@@ -63,12 +63,24 @@ export interface Computed<T> extends RawSignal<T>, Owner {
   child: FirewallSignal<any> | null;
 }
 
-export class NotReadyError extends Error {}
+export class NotReadyError extends Error {
+  constructor(public cause: Computed<unknown>) {
+    super();
+  }
+}
 
 let markedHeap = false;
 let stale = false;
 let context: Computed<unknown> | null = null;
 let clock = 0;
+let transition: Transition | null = null;
+let asyncNodes: Computed<unknown>[] = [];
+let pendingNodes: RawSignal<unknown>[] = [];
+interface Transition {
+  time: number;
+  asyncNodes: Computed<unknown>[];
+  pendingNodes: RawSignal<unknown>[];
+}
 interface Heap {
   heap: (Computed<unknown> | undefined)[];
   min: number;
@@ -84,7 +96,6 @@ const pending: Heap = {
   min: 0,
   max: 0,
 };
-const pendingNodes: RawSignal<unknown>[] = [];
 const NOT_PENDING = {};
 export function increaseHeapSize(n: number) {
   if (n > dirty.heap.length) {
@@ -134,7 +145,7 @@ function insertIntoHeapHeight(n: Computed<unknown>, heap: Heap) {
   actualInsertIntoHeap(n, heap);
 }
 
-function deleteFromHeap(n: Computed<unknown>, heap: Heap = dirty) {
+function deleteFromHeap(n: Computed<unknown>, heap: Heap) {
   const flags = n.flags;
   if (!(flags & (ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight))) return;
   n.flags = flags & ~(ReactiveFlags.InHeap | ReactiveFlags.InHeapHeight);
@@ -181,8 +192,8 @@ export function computed<T>(
     asyncFlags: AsyncFlags.Uninitialized,
     time: clock,
     pendingValue: NOT_PENDING,
-    pendingDisposal: NOT_PENDING,
-    pendingFirstChild: NOT_PENDING,
+    pendingDisposal: null,
+    pendingFirstChild: null,
   };
   self.prevHeap = self;
   if (context) {
@@ -255,7 +266,7 @@ export function asyncComputed<T>(
         }
       })();
     }
-    throw new NotReadyError();
+    throw new NotReadyError(context!);
   };
   const self = computed<T>(fn, initialValue as T);
   return self;
@@ -291,10 +302,16 @@ export function signal<T>(
 }
 
 function recompute(el: Computed<any>, create: boolean = false): void {
-  deleteFromHeap(el);
-  if (el.pendingValue !== NOT_PENDING) disposeChildren(el);
+  deleteFromHeap(el, el.flags & ReactiveFlags.Zombie ? pending : dirty);
+  if (
+    el.pendingValue !== NOT_PENDING ||
+    el.pendingFirstChild ||
+    el.pendingDisposal
+  )
+    disposeChildren(el);
   else {
     markDisposal(el);
+    pendingNodes.push(el);
     el.pendingDisposal = el.disposal;
     el.pendingFirstChild = el.firstChild;
     el.disposal = null;
@@ -314,6 +331,7 @@ function recompute(el: Computed<any>, create: boolean = false): void {
     clearAsyncFlags(el);
   } catch (e) {
     if (e instanceof NotReadyError) {
+      asyncNodes.push(e.cause);
       setAsyncFlags(
         el,
         (prevAsyncFlags & ~AsyncFlags.Error) | AsyncFlags.Pending
@@ -494,8 +512,8 @@ export function read<T>(
     }
   }
   if (el.asyncFlags & AsyncFlags.Pending) {
-    if (c && !stale || el.asyncFlags & AsyncFlags.Uninitialized)
-      throw new NotReadyError();
+    if ((c && !stale) || el.asyncFlags & AsyncFlags.Uninitialized)
+      throw new NotReadyError(el as Computed<unknown>);
   }
   if (el.asyncFlags & AsyncFlags.Error) {
     if (el.time < clock) {
@@ -506,7 +524,9 @@ export function read<T>(
       throw el.error;
     }
   }
-  return !c || el.pendingValue === NOT_PENDING
+  return !c ||
+    (stale && transition?.pendingNodes.includes(el) && !transitionComplete(transition)) ||
+    el.pendingValue === NOT_PENDING
     ? el.value
     : (el.pendingValue as T);
 }
@@ -577,8 +597,8 @@ function markHeap(heap: Heap) {
   }
 }
 
-function adjustHeight(el: Computed<unknown>, heap: Heap = dirty) {
-  deleteFromHeap(el);
+function adjustHeight(el: Computed<unknown>, heap: Heap) {
+  deleteFromHeap(el, heap);
   let newHeight = el.height;
   for (let d = el.deps; d; d = d.nextDep) {
     const dep1 = d.dep;
@@ -599,29 +619,59 @@ function adjustHeight(el: Computed<unknown>, heap: Heap = dirty) {
 
 export function stabilize() {
   markedHeap = false;
-  for (dirty.min = 0; dirty.min <= dirty.max; dirty.min++) {
-    let el = dirty.heap[dirty.min];
-    while (el !== undefined) {
-      if (el.flags & ReactiveFlags.InHeap) recompute(el);
-      else {
-        adjustHeight(el);
-      }
-      el = dirty.heap[dirty.min];
-    }
+  runHeap(dirty);
+  if (asyncNodes.length > 0) {
+    transition = {
+      time: clock,
+      asyncNodes,
+      pendingNodes,
+    };
+    runHeap(pending);
+    asyncNodes = [];
+    pendingNodes = [];
+    clock++;
+    return;
   }
-  dirty.max = 0;
+  if (transition && transitionComplete(transition)) {
+    pendingNodes.push(...transition.pendingNodes);
+    transition = null;
+  }
   for (let i = 0; i < pendingNodes.length; i++) {
     const n = pendingNodes[i];
-    n.value = n.pendingValue as any;
-    n.pendingValue = NOT_PENDING;
-    if ((n as Computed<unknown>).fn) {
-      disposeChildren(n as Computed<unknown>, true);
-      (n as Computed<unknown>).pendingDisposal = NOT_PENDING;
-      (n as Computed<unknown>).pendingFirstChild = NOT_PENDING;
+    if (n.pendingValue !== NOT_PENDING) {
+      n.value = n.pendingValue as any;
+      n.pendingValue = NOT_PENDING;
     }
+    if ((n as Computed<unknown>).fn)
+      disposeChildren(n as Computed<unknown>, true);
   }
   pendingNodes.length = 0;
   clock++;
+}
+
+function runHeap(heap: Heap) {
+  for (heap.min = 0; heap.min <= heap.max; heap.min++) {
+    let el = heap.heap[heap.min];
+    while (el !== undefined) {
+      if (el.flags & ReactiveFlags.InHeap) recompute(el);
+      else {
+        adjustHeight(el, heap);
+      }
+      el = heap.heap[heap.min];
+    }
+  }
+  heap.max = 0;
+}
+
+function transitionComplete(transition: Transition): boolean {
+  let done = true;
+  for (let i = 0; i < transition.asyncNodes.length; i++) {
+    if (transition.asyncNodes[i].asyncFlags & AsyncFlags.Pending) {
+      done = false;
+      break;
+    }
+  }
+  return done;
 }
 
 export function onCleanup(fn: Disposable): Disposable {
@@ -643,7 +693,11 @@ function markDisposal(el: Owner): void {
   let child = el.firstChild;
   while (child) {
     (child as Computed<unknown>).flags |= ReactiveFlags.Zombie;
-    deleteFromHeap(child as Computed<unknown>, dirty);
+    const inHeap = (child as Computed<unknown>).flags & ReactiveFlags.InHeap;
+    if (inHeap) {
+      deleteFromHeap(child as Computed<unknown>, dirty);
+      insertIntoHeap(child as Computed<unknown>, pending);
+    }
     markDisposal(child);
     child = child.nextSibling;
   }
@@ -655,7 +709,7 @@ function disposeChildren(node: Owner, zombie?: boolean): void {
     const nextChild = child.nextSibling;
     if ((child as Computed<unknown>).deps) {
       const n = child as Computed<unknown>;
-      deleteFromHeap(n);
+      deleteFromHeap(n, n.flags & ReactiveFlags.Zombie ? pending : dirty);
       let toRemove = n.deps;
       do {
         toRemove = unlinkSubs(toRemove!);
@@ -667,8 +721,12 @@ function disposeChildren(node: Owner, zombie?: boolean): void {
     disposeChildren(child);
     child = nextChild;
   }
-  node.firstChild = null;
-  node.nextSibling = null;
+  if (zombie) {
+    node.pendingFirstChild = null;
+  } else {
+    node.firstChild = null;
+    node.nextSibling = null;
+  }
   runDisposal(node, zombie);
 }
 
@@ -704,19 +762,12 @@ export function runWithOwner<T>(
   }
 }
 
-export function latest<T>(fn: () => T, fallback?: T): T {
+export function latest<T>(fn: () => T): T {
   const prevStale = stale;
   stale = true;
-  let result: T;
   try {
-    result = fn();
-  } catch (err) {
-    if (err instanceof NotReadyError && arguments.length > 1) {
-      return fallback as T;
-    }
-    throw err;
+    return fn();
   } finally {
     stale = prevStale;
   }
-  return result;
 }
