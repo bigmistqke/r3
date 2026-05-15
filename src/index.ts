@@ -436,3 +436,17 @@ function runDisposal(node: Computed<unknown>): void {
 export function getContext(): Computed<unknown> | null {
   return context;
 }
+
+/**
+ * Run `fn` outside any reactive tracking context. Signals read inside `fn`
+ * are not recorded as dependencies of the enclosing computation.
+ */
+export function untrack<T>(fn: () => T): T {
+  const saved = context;
+  context = null;
+  try {
+    return fn();
+  } finally {
+    context = saved;
+  }
+}
