@@ -164,9 +164,13 @@ function recompute(el: Computed<unknown>, del: boolean) {
   context = el;
   el.depsTail = null;
   el.flags = ReactiveFlags.RecomputingDeps;
-  const value = el.fn();
-  el.flags = ReactiveFlags.None;
-  context = oldcontext;
+  let value: unknown;
+  try {
+    value = el.fn();
+  } finally {
+    el.flags = ReactiveFlags.None;
+    context = oldcontext;
+  }
 
   const depsTail = el.depsTail as Link | null;
   let toRemove = depsTail !== null ? depsTail.nextDep : el.deps;
