@@ -237,7 +237,19 @@ function unlinkSubs(link: Link): Link | null {
   return nextDep;
 }
 
-function unwatched(el: Computed<unknown>) {
+/**
+ * Detach a computed from the graph: remove from the dirty heap, unlink from
+ * all of its dependencies (cascading their cleanup if they lose their last
+ * sub), and run its registered `onCleanup` callbacks. Fires automatically
+ * when a computed loses its last sub; framework authors may call it directly
+ * to dispose leaf nodes (e.g. effects) that have no subs.
+ *
+ * **Framework-author API.** Application code should not need this — r3's
+ * automatic disposal handles the common case. Callers must ensure the node
+ * has no live downstream subs at the time of the call (otherwise those subs
+ * are left with dangling `deps` pointing at a non-recomputing node).
+ */
+export function unwatched(el: Computed<unknown>) {
   deleteFromHeap(el);
   let dep = el.deps;
   while (dep !== null) {
