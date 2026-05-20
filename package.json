@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "tsdown --dts src/index.ts",
+    "prepare": "tsdown --dts src/index.ts",
     "test": "vitest",
     "bench": "vitest bench",
     "format": "prettier --write ."
