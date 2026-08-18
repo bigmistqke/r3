@@ -442,6 +442,33 @@ export function cancelRecompute(
   return queued;
 }
 
+/**
+ * The inverse of `cancelRecompute`: schedule `el` for recomputation, as if
+ * one of its own dependencies had just been written to. Marking it dirty
+ * alone is not enough for a node nothing else reads through a tracked call —
+ * `stabilize` only walks the heap, and a node that is merely flagged dirty
+ * but sits outside the heap is picked up only by a consumer that happens to
+ * pull it from within another node's own recompute. A node with no such
+ * consumer — the common case for a leaf a caller reads directly — would stay
+ * dirty and unscheduled forever. Putting it back in the heap is what makes
+ * the next `stabilize` actually recompute it, matching what a real write to
+ * one of its dependencies would have done.
+ *
+ * Existed for one caller: something that withdrew a node's queued recompute
+ * on the expectation of immediately producing a replacement value, and then
+ * did not — the withdrawal has to be undone, not merely left dirty.
+ *
+ * A node in the middle of its own run is refused, for the same reason
+ * `cancelRecompute` refuses one: `flags` currently holds `RecomputingDeps`,
+ * and overwriting it would corrupt the dependency rebuild `recompute`
+ * performs when the body returns.
+ */
+export function requeueRecompute(el: Computed<unknown>): void {
+  if (el.flags & ReactiveFlags.RecomputingDeps) return;
+  markNode(el);
+  insertIntoHeap(el);
+}
+
 export function onCleanup(fn: Disposable): Disposable {
   if (!context) return fn;
 

@@ -5,6 +5,7 @@ import {
   Computed,
   isRecomputeQueued,
   read,
+  requeueRecompute,
   setSignal,
   Signal,
   signal,
@@ -375,4 +376,46 @@ test("cancelRecompute refuses a node that is running and leaves its dependency r
   stabilize(); // run 3 — only happens if the link to `t` survived run 2
   expect(runs).toBe(3);
   expect(c!.value).toBe(202);
+});
+
+test("requeueRecompute schedules a node with no consumer of its own", () => {
+  let runs = 0;
+  const s = signal(1);
+  const c = computed(() => {
+    runs++;
+    return read(s) + 1;
+  });
+  stabilize();
+  expect(runs).toBe(1);
+  expect(c.value).toBe(2);
+
+  setSignal(s, 10);
+  expect(cancelRecompute(c, true)).toBe(true); // withdrawn, left dirty-not-heaped
+  requeueRecompute(c);
+
+  // No consumer pulls `c` — a plain `stabilize()` is the only thing that can
+  // recompute it now, and it does, because requeueRecompute put it back in
+  // the heap rather than leaving it merely flagged.
+  stabilize();
+  expect(runs).toBe(2);
+  expect(c.value).toBe(11);
+});
+
+test("requeueRecompute refuses a node that is running", () => {
+  let refused = true;
+  const s = signal(1);
+  let c: Computed<number> | undefined;
+  c = computed(() => {
+    if (c) {
+      const before = c.flags;
+      requeueRecompute(c);
+      refused = c.flags === before; // no observable change
+    }
+    return read(s) + 1;
+  });
+  stabilize();
+  setSignal(s, 2);
+  stabilize();
+  expect(refused).toBe(true);
+  expect(c!.value).toBe(3);
 });
