@@ -350,19 +350,29 @@ test("cancelRecompute can leave the node needing recomputation", () => {
   expect(d.value).toBe(1 + 11);
 });
 
-test("cancelRecompute refuses a node that is running", () => {
-  let refused: boolean | null = null;
+test("cancelRecompute refuses a node that is running and leaves its dependency rebuild intact", () => {
+  let runs = 0;
   const s = signal(1);
+  const t = signal(100);
   let c: Computed<number> | undefined;
   c = computed(() => {
-    if (c) refused = cancelRecompute(c);
-    return read(s) + 1;
+    runs++;
+    const a = read(s);
+    if (c) cancelRecompute(c); // refused — must not disturb the rebuild
+    const b = read(t); // read AFTER the call: this link must still form
+    return a + b;
   });
-  stabilize();
-  expect(c!.value).toBe(2);
+
+  stabilize(); // run 1 — c is not yet assigned, so no mid-run call happens
+  expect(c!.value).toBe(101);
 
   setSignal(s, 2);
-  stabilize();
-  expect(refused).toBe(false);
-  expect(c!.value).toBe(3);
+  stabilize(); // run 2 — the mid-run call happens here
+  expect(runs).toBe(2);
+  expect(c!.value).toBe(102);
+
+  setSignal(t, 200);
+  stabilize(); // run 3 — only happens if the link to `t` survived run 2
+  expect(runs).toBe(3);
+  expect(c!.value).toBe(202);
 });
