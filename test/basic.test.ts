@@ -1,5 +1,15 @@
 import { expect, test } from "vitest";
-import { computed, read, setSignal, Signal, signal, stabilize } from "../src";
+import {
+  cancelRecompute,
+  computed,
+  Computed,
+  isRecomputeQueued,
+  read,
+  setSignal,
+  Signal,
+  signal,
+  stabilize,
+} from "../src";
 
 test("basic", () => {
   let aCount = 0;
@@ -280,4 +290,79 @@ test("firewall signals", () => {
 
   expect(a.value).toBe(false);
   expect(b.value).toBe(true);
+});
+
+test("cancelRecompute withdraws a queued recompute", () => {
+  let runs = 0;
+  const s = signal(1);
+  const c = computed(() => {
+    runs++;
+    return read(s) + 1;
+  });
+  stabilize();
+  expect(runs).toBe(1);
+  expect(c.value).toBe(2);
+
+  setSignal(s, 10);
+  expect(isRecomputeQueued(c)).toBe(true);
+  expect(cancelRecompute(c)).toBe(true);
+  expect(isRecomputeQueued(c)).toBe(false);
+
+  stabilize();
+  expect(runs).toBe(1); // the flush did not run it
+  expect(c.value).toBe(2); // stale, by design
+
+  setSignal(s, 20);
+  stabilize();
+  expect(runs).toBe(2); // a later change still schedules it
+  expect(c.value).toBe(21);
+});
+
+test("cancelRecompute reports false when nothing was queued", () => {
+  const s = signal(1);
+  const c = computed(() => read(s) + 1);
+  stabilize();
+  expect(isRecomputeQueued(c)).toBe(false);
+  expect(cancelRecompute(c)).toBe(false);
+});
+
+test("cancelRecompute can leave the node needing recomputation", () => {
+  let cRuns = 0;
+  const s = signal(1);
+  const t = signal(0);
+  const c = computed(() => {
+    cRuns++;
+    return read(s) + 1;
+  });
+  const d = computed(() => read(t) + read(c));
+  stabilize();
+  expect(cRuns).toBe(1);
+  expect(d.value).toBe(2);
+
+  setSignal(s, 10);
+  cancelRecompute(c, true);
+  stabilize();
+  expect(cRuns).toBe(1); // the flush did not run it
+
+  setSignal(t, 1);
+  stabilize();
+  expect(cRuns).toBe(2); // a consumer reading it pulled it up to date
+  expect(d.value).toBe(1 + 11);
+});
+
+test("cancelRecompute refuses a node that is running", () => {
+  let refused: boolean | null = null;
+  const s = signal(1);
+  let c: Computed<number> | undefined;
+  c = computed(() => {
+    if (c) refused = cancelRecompute(c);
+    return read(s) + 1;
+  });
+  stabilize();
+  expect(c!.value).toBe(2);
+
+  setSignal(s, 2);
+  stabilize();
+  expect(refused).toBe(false);
+  expect(c!.value).toBe(3);
 });

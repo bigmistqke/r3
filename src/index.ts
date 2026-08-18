@@ -403,6 +403,45 @@ export function stabilize() {
   }
 }
 
+/**
+ * Whether a recompute of `el` is outstanding — queued in the heap, or marked
+ * dirty and waiting to be pulled by a reader. Reported through a function
+ * rather than by exposing the flags, because `ReactiveFlags` is a const enum
+ * and does not survive a package boundary.
+ */
+export function isRecomputeQueued(el: Computed<unknown>): boolean {
+  return (
+    (el.flags &
+      (ReactiveFlags.Dirty | ReactiveFlags.Check | ReactiveFlags.InHeap)) !==
+    0
+  );
+}
+
+/**
+ * Withdraw an outstanding recompute of `el` and report whether there was one.
+ * Clearing the flags alone is not enough: `stabilize` recomputes everything in
+ * the heap without consulting them, so the node has to leave the heap.
+ *
+ * `keepDirty` leaves the node needing recomputation instead of clean, so it is
+ * skipped by the next flush but recomputed by the next consumer that reads it.
+ * That is the right state for a node whose input has moved but whose own work
+ * was abandoned.
+ *
+ * A node in the middle of its own run is refused: `flags` currently holds
+ * `RecomputingDeps`, and overwriting it would corrupt the dependency rebuild
+ * that `recompute` performs when the body returns.
+ */
+export function cancelRecompute(
+  el: Computed<unknown>,
+  keepDirty = false,
+): boolean {
+  if (el.flags & ReactiveFlags.RecomputingDeps) return false;
+  const queued = isRecomputeQueued(el);
+  deleteFromHeap(el);
+  el.flags = keepDirty ? ReactiveFlags.Dirty : ReactiveFlags.None;
+  return queued;
+}
+
 export function onCleanup(fn: Disposable): Disposable {
   if (!context) return fn;
 
