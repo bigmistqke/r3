@@ -352,6 +352,27 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
   return el.value;
 }
 
+/**
+ * Bring `el` up to date and return its value, without running anything else
+ * the heap holds. A read made inside a computed already does this: it marks
+ * the heap and recomputes only what `el` depends on. A read made outside every
+ * computed has no such path, and the only way to make it current is
+ * `stabilize`, which runs every queued node — consumers with side effects
+ * included — at whatever moment the read happens.
+ *
+ * What `pull` recomputes leaves the heap, so the next `stabilize` does not run
+ * it again. Nodes that depend on it, and every other queued node, still run at
+ * that next `stabilize`, as they would have without the pull.
+ */
+export function pull<T>(el: Signal<T> | Computed<T>): T {
+  const owner = "owner" in el ? el.owner : el;
+  if ("fn" in owner) {
+    markHeap();
+    updateIfNecessary(owner);
+  }
+  return el.value;
+}
+
 export function setSignal(el: Signal<unknown>, v: unknown) {
   if (el.value === v) return;
   el.value = v;

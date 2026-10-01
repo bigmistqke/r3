@@ -4,6 +4,7 @@ import {
   computed,
   Computed,
   isRecomputeQueued,
+  pull,
   read,
   requeueRecompute,
   setSignal,
@@ -418,4 +419,73 @@ test("requeueRecompute refuses a node that is running", () => {
   stabilize();
   expect(refused).toBe(true);
   expect(c!.value).toBe(3);
+});
+
+test("pull brings one computed up to date without running the rest of the heap", () => {
+  const s = signal(1);
+  let doubledRuns = 0;
+  let otherRuns = 0;
+  const doubled = computed(() => {
+    doubledRuns++;
+    return read(s) * 2;
+  });
+  computed(() => {
+    otherRuns++;
+    return read(s);
+  });
+  stabilize();
+  expect([doubledRuns, otherRuns]).toEqual([1, 1]);
+
+  setSignal(s, 5);
+  expect(pull(doubled)).toBe(10);
+  expect([doubledRuns, otherRuns]).toEqual([2, 1]); // the other node waits
+
+  stabilize();
+  // The other node runs now, and the pulled one is not run again.
+  expect([doubledRuns, otherRuns]).toEqual([2, 2]);
+});
+
+test("pull reaches through a chain and leaves what depends on the pulled node to the next stabilize", () => {
+  const s = signal(1);
+  let middleRuns = 0;
+  let endRuns = 0;
+  let consumerRuns = 0;
+  const middle = computed(() => {
+    middleRuns++;
+    return read(s) + 1;
+  });
+  const end = computed(() => {
+    endRuns++;
+    return read(middle) * 10;
+  });
+  computed(() => {
+    consumerRuns++;
+    return read(end);
+  });
+  stabilize();
+
+  setSignal(s, 2);
+  expect(pull(end)).toBe(30);
+  expect([middleRuns, endRuns, consumerRuns]).toEqual([2, 2, 1]);
+
+  stabilize();
+  expect([middleRuns, endRuns, consumerRuns]).toEqual([2, 2, 2]);
+});
+
+test("pull of a node whose sources have not changed runs nothing", () => {
+  const s = signal(1);
+  let runs = 0;
+  const c = computed(() => {
+    runs++;
+    return read(s) + 1;
+  });
+  stabilize();
+  expect(pull(c)).toBe(2);
+  expect(runs).toBe(1);
+});
+
+test("pull of a signal returns its value", () => {
+  const s = signal(1);
+  setSignal(s, 7);
+  expect(pull(s)).toBe(7);
 });
