@@ -202,7 +202,9 @@ function recompute(el: Computed<unknown>, del: boolean) {
 function updateIfNecessary(el: Computed<unknown>): void {
   if (el.flags & ReactiveFlags.Check) {
     for (let d = el.deps; d; d = d.nextDep) {
-      const dep = d.dep;
+      // A firewall signal is written by its owner's run, so bringing the
+      // signal up to date means bringing its owner up to date.
+      const dep = "owner" in d.dep ? d.dep.owner : d.dep;
       if ("fn" in dep) {
         updateIfNecessary(dep);
       }
@@ -378,7 +380,11 @@ export function setSignal(el: Signal<unknown>, v: unknown) {
   el.value = v;
   for (let link = el.subs; link !== null; link = link.nextSub) {
     markedHeap = false;
-    insertIntoHeap(link.sub);
+    // A subscriber marked only to check its dependencies now has one that
+    // changed, as when a computed it reads changes value.
+    const sub = link.sub;
+    if (sub.flags & ReactiveFlags.Check) sub.flags |= ReactiveFlags.Dirty;
+    insertIntoHeap(sub);
   }
 }
 

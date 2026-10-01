@@ -489,3 +489,48 @@ test("pull of a signal returns its value", () => {
   setSignal(s, 7);
   expect(pull(s)).toBe(7);
 });
+
+test("pull brings the owner of a firewall signal up to date before reading through it", () => {
+  const source = signal(1);
+  let published!: Signal<number>;
+  let ownerRuns = 0;
+  const owner = computed(() => {
+    ownerRuns++;
+    const v = read(source);
+    if (published) setSignal(published, v * 10);
+  });
+  published = signal(10, owner);
+  let readerRuns = 0;
+  let otherRuns = 0;
+  const reader = computed(() => {
+    readerRuns++;
+    return read(published) + 1;
+  });
+  computed(() => {
+    otherRuns++;
+    return read(source);
+  });
+  stabilize();
+  expect(reader.value).toBe(11);
+
+  setSignal(source, 2);
+  // The reader depends on the owner only through the signal the owner writes.
+  expect(pull(reader)).toBe(21);
+  expect([ownerRuns, readerRuns, otherRuns]).toEqual([2, 2, 1]);
+
+  stabilize();
+  expect([ownerRuns, readerRuns, otherRuns]).toEqual([2, 2, 2]);
+});
+
+test("pull of a firewall signal runs its owner first", () => {
+  const source = signal(1);
+  let published!: Signal<number>;
+  const owner = computed(() => {
+    const v = read(source);
+    if (published) setSignal(published, v * 10);
+  });
+  published = signal(10, owner);
+  stabilize();
+  setSignal(source, 3);
+  expect(pull(published)).toBe(30);
+});
