@@ -534,3 +534,24 @@ test("pull of a firewall signal runs its owner first", () => {
   setSignal(source, 3);
   expect(pull(published)).toBe(30);
 });
+
+test("pull leaves a node withdrawn from the heap for a tracked read to bring up to date", () => {
+  const s = signal(1);
+  let runs = 0;
+  const c = computed(() => {
+    runs++;
+    return read(s) * 2;
+  });
+  stabilize();
+  setSignal(s, 2);
+  cancelRecompute(c, true); // withdrawn, left needing recomputation
+
+  // A pull runs what stabilize would run, and stabilize would not run `c`.
+  expect(pull(c)).toBe(2);
+  expect(runs).toBe(1);
+
+  // A read made inside a computed still brings it up to date.
+  const reader = computed(() => read(c) + 1);
+  expect(reader.value).toBe(5);
+  expect(runs).toBe(2);
+});

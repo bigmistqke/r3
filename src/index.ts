@@ -370,9 +370,41 @@ export function pull<T>(el: Signal<T> | Computed<T>): T {
   const owner = "owner" in el ? el.owner : el;
   if ("fn" in owner) {
     markHeap();
-    updateIfNecessary(owner);
+    pullQueued(owner);
   }
   return el.value;
+}
+
+/**
+ * Bring `el` up to date the way `stabilize` would: recompute it, and what it
+ * depends on, only where the node is queued in the heap. A node that
+ * `cancelRecompute` withdrew from the heap while leaving it dirty is left as it
+ * is, for a tracked read to bring up to date, as `stabilize` leaves it. Reads
+ * made inside a recompute go through `read`, so they still pull such a node.
+ */
+function pullQueued(el: Computed<unknown>): void {
+  if (el.flags & ReactiveFlags.Check) {
+    for (let d = el.deps; d; d = d.nextDep) {
+      const dep = "owner" in d.dep ? d.dep.owner : d.dep;
+      if ("fn" in dep) {
+        pullQueued(dep);
+      }
+      if (el.flags & ReactiveFlags.Dirty) {
+        break;
+      }
+    }
+  }
+
+  // Queued: stabilize would run it, so the pull does, and takes it out of the
+  // heap so the next stabilize does not run it again.
+  if (el.flags & ReactiveFlags.InHeap) {
+    recompute(el, true);
+    return;
+  }
+  // Withdrawn from the heap but left dirty: stays dirty for a tracked read.
+  if (el.flags & ReactiveFlags.Dirty) return;
+
+  el.flags = ReactiveFlags.None;
 }
 
 export function setSignal(el: Signal<unknown>, v: unknown) {
