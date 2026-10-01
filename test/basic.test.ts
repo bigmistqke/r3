@@ -140,6 +140,42 @@ test("dynamic source disappears entirely", () => {
   expect(count).toBe(3);
 });
 
+test("a computed read again after losing its last consumer follows its sources", () => {
+  const show = signal(true);
+  const base = signal(1);
+  let runs = 0;
+
+  const derived = computed(() => {
+    runs++;
+    return read(base) * 10;
+  });
+  const reader = computed(() => (read(show) ? read(derived) : -1));
+
+  stabilize();
+  expect(reader.value).toBe(10);
+
+  // The reader stops reading derived, which then has no consumer left and is
+  // detached from base.
+  setSignal(show, false);
+  stabilize();
+  expect(reader.value).toBe(-1);
+
+  // base changes while derived is detached, so nothing tells derived.
+  setSignal(base, 2);
+  stabilize();
+
+  // Read again, derived must not hand back the value from before it was
+  // detached, and must follow base from then on.
+  setSignal(show, true);
+  stabilize();
+  expect(reader.value).toBe(20);
+
+  setSignal(base, 3);
+  stabilize();
+  expect(reader.value).toBe(30);
+  expect(runs).toBe(3);
+});
+
 test("small dynamic graph with signal grandparents", () => {
   const z = signal(3);
   const x = signal(0);

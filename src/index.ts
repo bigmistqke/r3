@@ -250,6 +250,10 @@ function unlinkSubs(link: Link): Link | null {
  * when a computed loses its last sub; framework authors may call it directly
  * to dispose leaf nodes (e.g. effects) that have no subs.
  *
+ * The node is left dirty. Detached, it no longer hears about changes to its
+ * sources, so the value it holds cannot be trusted: a tracked read that
+ * attaches it again recomputes it, which also links its sources again.
+ *
  * **Framework-author API.** Application code should not need this — r3's
  * automatic disposal handles the common case. Callers must ensure the node
  * has no live downstream subs at the time of the call (otherwise those subs
@@ -262,6 +266,7 @@ export function unwatched(el: Computed<unknown>) {
     dep = unlinkSubs(dep);
   }
   el.deps = null;
+  el.flags = ReactiveFlags.Dirty;
   runDisposal(el);
 }
 
